@@ -64,9 +64,9 @@ class LowerBound(Layer):
         super(LowerBound, self).__init__(**kwargs)
 
     def call(self, input_tensor):
-        z_mean, z_log_var, bow_input, bow_output, bow_mask = input_tensor
+        mu, log_squared_sigma, bow_input, bow_output, bow_mask = input_tensor
 
-        kl = -0.5 * K.sum(1 - K.square(z_mean) +  z_log_var - K.exp(z_log_var), axis=-1)
+        kl = -0.5 * K.sum(1 - K.square(mu) +  log_squared_sigma - K.exp(log_squared_sigma), axis=-1)
         kl *= bow_mask
 
         nnl = -K.sum(bow_input * K.log(bow_output + K.epsilon()), axis=-1)
@@ -318,10 +318,10 @@ class DyCNN(Layer):
         return (input_shape[0][0], input_shape[0][1], self.filters)
     
 def sampling(args):
-    mean, log_var = args
-    topic_num = K.int_shape(mean)[-1]
+    mu, log_squared_sigma = args
+    topic_num = K.int_shape(mu)[-1]
     epsilon = K.random_normal(shape=(topic_num,), mean=0., stddev=1.)
-    return mean + K.exp(log_var / 2) * epsilon
+    return mu + K.exp(log_squared_sigma / 2) * epsilon
 
 def kl_loss(y_true, y_pred):
     return y_pred
@@ -336,75 +336,75 @@ def create_model(bow_maxlen, hidden_size, topic_num, shortcut, seq_maxlen, dropo
     np.random.seed(1337)
     random.seed(1337)
     ### cnn layers ###
-    gen_emb = Embedding(seq_emb.shape[0], seq_emb.shape[1], weights=[seq_emb], trainable=False, name='gen_emb')
-    conv1 = Conv1D(filters=300, kernel_size=3, padding='same', use_bias=True, activation='relu', name='conv1')
-    conv2 = DyCNN(filters=300, kernel_size=5, padding='same', use_bias=True, activation='relu', name='conv2')
-    conv3 = Conv1D(filters=300, kernel_size=5, padding='same', use_bias=True, activation='relu', name='conv3')
-    conv4 = DyCNN(filters=300, kernel_size=5, padding='same', use_bias=True, activation='relu', name='conv4')
+    embedding = Embedding(seq_emb.shape[0], seq_emb.shape[1], weights=[seq_emb], trainable=False, name='embedding')
+    general_cnn1 = Conv1D(filters=300, kernel_size=3, padding='same', use_bias=True, activation='relu', name='general_cnn1')
+    dynamic_cnn1 = DyCNN(filters=300, kernel_size=5, padding='same', use_bias=True, activation='relu', name='dynamic_cnn1')
+    general_cnn2 = Conv1D(filters=300, kernel_size=5, padding='same', use_bias=True, activation='relu', name='general_cnn2')
+    dynamic_cnn2 = DyCNN(filters=300, kernel_size=5, padding='same', use_bias=True, activation='relu', name='dynamic_cnn2')
     linear = Dense(3, activation='softmax', name='linear')
     
     att1 = Attention(name='att1')
     att2 = Attention2(name='att2')
 
     ### ntm layers ###
-    e1 = Dense(hidden_size, activation='relu', name='e1')
-    e2 = Dense(hidden_size, activation='relu', name='e2')
-    es = Dense(hidden_size, name='es')
-    e3 = Dense(topic_num, name='e3')
-    e4 = Dense(topic_num, name='e4')
+    f_e1 = Dense(hidden_size, activation='relu', name='f_e1')
+    f_e2 = Dense(hidden_size, activation='relu', name='f_e2')
+    f_es = Dense(hidden_size, name='f_es')
+    f_mu = Dense(topic_num, name='f_mu')
+    f_sigma = Dense(topic_num, name='f_sigma')
 
-    g1 = Dense(topic_num, activation='relu', name='g1')
-    g2 = Dense(topic_num, activation='relu', name='g2')
-    g3 = Dense(topic_num, activation='relu', name='g3')
-    g4 = Dense(topic_num, activation='relu', name='g4')
+    f_theta1 = Dense(topic_num, activation='relu', name='f_theta1')
+    f_theta2 = Dense(topic_num, activation='relu', name='f_theta2')
+    f_theta3 = Dense(topic_num, activation='relu', name='f_theta3')
+    f_theta4 = Dense(topic_num, activation='relu', name='f_theta4')
 
     ### ntm graph ###
     bow_input = Input(shape=(bow_maxlen,), name='bow_input')
     bow_mask = BowMasking()(bow_input)
 
-    h = e1(bow_input)
-    h = e2(h)
+    h = f_e1(bow_input)
+    h = f_e2(h)
     if shortcut:
-        h = add([h, es(bow_input)])
+        h = add([h, f_es(bow_input)])
 
-    z_mean = e3(h)
-    z_log_var = e4(h)
-    hidden = Lambda(sampling)([z_mean, z_log_var])
+    mu = f_mu(h)
+    log_squared_sigma = f_sigma(h)
+    hidden = Lambda(sampling, name='sampling')([mu, log_squared_sigma])
 
-    tmp = g1(hidden)
-    tmp = g2(tmp)
-    tmp = g3(tmp)
-    tmp = g4(tmp)
+    tmp = f_theta1(hidden)
+    tmp = f_theta2(tmp)
+    tmp = f_theta3(tmp)
+    tmp = f_theta4(tmp)
     if shortcut:
         tmp = add([tmp, hidden])
 
-    d1 = Decoder(weights=[topic_emb, bow_emb], name='d1')
-    bow_output, theta, tv = d1(tmp)
+    decoder = Decoder(weights=[topic_emb, bow_emb], name='decoder')
+    bow_output, theta, tv = decoder(tmp)
 
-    kl, nnl = LowerBound()([z_mean, z_log_var, bow_input, bow_output, bow_mask])
+    kl, nnl = LowerBound()([mu, log_squared_sigma, bow_input, bow_output, bow_mask])
     reg = Regularization()(tv)
 
     ### cnn graph ###
     seq_input = Input(shape=(seq_maxlen,), name='seq_input')
     seq_mask = SeqMasking()(seq_input)
 
-    x = gen_emb(seq_input)
+    x = embedding(seq_input)
     x = Dropout(dropout)(x)
 
-    x = conv1(x)
+    x = general_cnn1(x)
     p, e = att1([x, theta, seq_mask])
     z = WeightedSum()([x, e])
     x = Dropout(dropout)(x)
 
-    x = conv2([x, z])
+    x = dynamic_cnn1([x, z])
     x = Dropout(dropout)(x)
 
-    x = conv3(x)
+    x = general_cnn2(x)
     p, e = att2([x, p, z, theta, seq_mask])
     z = WeightedSum()([x, e])
     x = Dropout(dropout)(x)
 
-    x = conv4([x, z])
+    x = dynamic_cnn2([x, z])
 
     pred = linear(x)
 

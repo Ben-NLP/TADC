@@ -1,5 +1,6 @@
 from keras.backend import set_session
 from keras.utils.np_utils import to_categorical
+from keras.utils import plot_model
 import tensorflow as tf
 
 from layers import create_model
@@ -84,6 +85,7 @@ def execute(data_dir, model_dir, hidden_size, topic_num, shortcut, top_k, dropou
     train_batches_num = get_batches_num(train_bow, batch_size)
 
     model = create_model(train_bow.shape[1], hidden_size, topic_num, shortcut, train_seq.shape[1], dropout, lr, topic_emb, bow_emb, seq_emb)
+    plot_model(model, to_file='model.png', show_shapes=True)
     train(model, model_dir, epochs, train_batches_num, batch_size, train_bow, valid_bow, train_seq, valid_seq, train_y, valid_y)
 
     model = create_model(test_bow.shape[1], hidden_size, topic_num, shortcut, test_seq.shape[1], dropout, lr, topic_emb, bow_emb, seq_emb)
